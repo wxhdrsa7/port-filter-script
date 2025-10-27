@@ -1,4 +1,3 @@
-
 # 🛡️ 端口访问控制脚本
 
 一键设置防火墙端口过滤规则，支持 IP 地域过滤、端口屏蔽/放行。
@@ -16,17 +15,17 @@
 
 ### 一键安装（推荐）
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/你的用户名/port-filter-script/main/install.sh)
+sudo bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
 ```
 
 或使用 wget：
 ```bash
-sudo bash <(wget -qO- https://raw.githubusercontent.com/你的用户名/port-filter-script/main/install.sh)
+sudo bash <(wget -qO- https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
 ```
 
 ### 使用 CDN（国内访问更快）
 ```bash
-sudo bash <(curl -sL https://cdn.jsdelivr.net/gh/你的用户名/port-filter-script/install.sh)
+sudo bash <(curl -sL https://cdn.jsdelivr.net/gh/wxhdrsa7/port-filter-script/install.sh)
 ```
 
 ## 📖 使用方法
@@ -124,7 +123,7 @@ port_filter.sh  # 完整命令
 
 重新运行安装命令即可更新到最新版本：
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/你的用户名/port-filter-script/main/install.sh)
+sudo bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
 ```
 
 ## 🐛 常见问题
@@ -168,4 +167,25 @@ MIT License
 
 ## 📞 支持
 
-如有问题请提交 [Issue](https://github.com/你的用户名/port-filter-script/issues)
+如有问题请提交 [Issue](https://github.com/wxhdrsa7/port-filter-script/issues)
+```
+
+---
+
+## 📂 最终文件结构
+
+你的仓库应该有这些文件：
+```
+port-filter-script/
+├── README.md           # 说明文档
+├── port_filter.sh      # 主脚本
+└── install.sh          # 安装脚本
+```
+
+---
+
+## 🔗 你的专属链接
+
+### 仓库地址
+```
+https://github.com/wxhdrsa7/port-filter-script
