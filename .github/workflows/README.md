@@ -13,19 +13,20 @@
 
 ## 🚀 快速安装
 
-### 一键安装（推荐）
+### 方法1：一键安装（推荐）
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
+curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh | sudo bash
 ```
 
-或使用 wget：
+### 方法2：分步安装
 ```bash
-sudo bash <(wget -qO- https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
+curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-### 使用 CDN（国内访问更快）
+### 方法3：使用 CDN
 ```bash
-sudo bash <(curl -sL https://cdn.jsdelivr.net/gh/wxhdrsa7/port-filter-script/install.sh)
+curl -sL https://cdn.jsdelivr.net/gh/wxhdrsa7/port-filter-script/install.sh | sudo bash
 ```
 
 ## 📖 使用方法
