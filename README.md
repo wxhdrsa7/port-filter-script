@@ -21,6 +21,12 @@
 ```bash
 sudo bash install.sh
 ```
+或使用一键脚本自动下载安装并运行：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
+```
+
 安装脚本会将 `port-filter.sh` 安装到 `/usr/local/bin/port-filter` 并立即启动交互界面。
 
 ## 🕹 使用指南
