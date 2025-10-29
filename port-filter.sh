@@ -552,17 +552,39 @@ main() {
     done
 }
 
+# 参数帮助
+print_usage() {
+    cat <<'USAGE'
+用法：port-filter [选项]
+
+选项：
+  --update-ip    仅更新中国 IP 列表并保存规则
+  --version,-v   查看脚本版本
+  --help,-h      显示本帮助信息
+USAGE
+}
+
 # 处理命令行参数
-if [ "$1" = "--update-ip" ]; then
-    check_root
-    install_dependencies
-    if download_china_ip; then
-        save_rules
+case "$1" in
+    "--update-ip")
+        check_root
+        install_dependencies
+        if download_china_ip; then
+            save_rules
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    "--version"|"-v")
+        echo "$VERSION"
         exit 0
-    else
-        exit 1
-    fi
-fi
+        ;;
+    "--help"|"-h")
+        print_usage
+        exit 0
+        ;;
+esac
 
 # 运行主程序
 main
