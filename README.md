@@ -35,6 +35,14 @@
 sudo /usr/local/bin/port-filter --update-ip
 ```
 
+更多命令行参数：
+
+| 参数 | 说明 |
+| ---- | ---- |
+| `--help` / `-h` | 查看帮助信息 |
+| `--version` / `-v` | 查看当前脚本版本 |
+| `--update-ip` | 仅更新中国 IP 列表并保存规则 |
+
 ## 🚀 安装
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
