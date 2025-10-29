@@ -25,7 +25,7 @@ CN_IPSET_NAME="pf_cn_ipv4"
 IPTABLES_CHAIN="PORT_FILTER"
 
 CN_IP_SOURCES=(
-    "https://raw.githubusercontent.com/metowolf/iplist/master/data/cn/china.txt"
+    "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/cn.cidr"
     "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
     "https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china.txt"
 )
@@ -73,8 +73,8 @@ init_environment() {
 }
 
 install_dependencies() {
-    local missing=()
     local deps=(ipset iptables curl)
+    local missing=()
 
     for dep in "${deps[@]}"; do
         if ! command_exists "$dep"; then
@@ -85,7 +85,9 @@ install_dependencies() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         if command_exists apt-get; then
             log INFO "正在安装依赖: ${missing[*]}"
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+            if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
+                log WARN "apt-get 更新失败，请检查网络或软件源"
+            fi
             if DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1; then
                 log SUCCESS "依赖安装完成"
             else
@@ -101,6 +103,18 @@ install_dependencies() {
         else
             log WARN "检测到缺失依赖: ${missing[*]}，请手动安装"
         fi
+    fi
+
+    missing=()
+    for dep in "${deps[@]}"; do
+        if ! command_exists "$dep"; then
+            missing+=("$dep")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log ERROR "缺少依赖: ${missing[*]}。请安装相关软件包后重新运行脚本"
+        exit 1
     fi
 }
 

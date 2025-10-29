@@ -9,7 +9,7 @@
 - 彩色交互界面，SSH 终端友好
 
 ## ✨ 功能特性
-- ✅ 国内 IP 库聚合：整合 metowolf、17mon、gaoyifan 三套规则
+- ✅ 国内 IP 库聚合：整合 herrbischoff、17mon、gaoyifan 三套规则
 - ✅ 一键更新国内 IP 集合，并写入 ipset
 - ✅ 端口规则持久化保存，系统重启后自动恢复
 - ✅ 针对端口的「阻止国内访问」与「仅允许国内访问」双模式
@@ -21,7 +21,15 @@
 ```bash
 sudo bash install.sh
 ```
+或使用一键脚本自动下载安装并运行：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/install.sh)
+```
+
 安装脚本会将 `port-filter.sh` 安装到 `/usr/local/bin/port-filter` 并立即启动交互界面。
+
+> 依赖说明：脚本运行需要 `ipset`、`iptables`、`curl`。安装器会尝试自动安装缺失的软件包，如自动安装失败请手动安装后重试。
 
 ## 🕹 使用指南
 1. 「更新国内 IP 库」：从多个数据源下载并写入 `ipset`。
