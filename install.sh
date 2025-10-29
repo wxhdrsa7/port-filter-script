@@ -1,72 +1,27 @@
 #!/bin/bash
-# install.sh - 安装并启动 Port Filter Script
+# install.sh - 一键安装端口防火墙脚本
+# 作者：你 + GPT
+# 仓库：https://github.com/wxhdrsa7/port-filter-script
 
-set -euo pipefail
+set -e
 
-TARGET="/usr/local/bin/port-filter"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-SCRIPT_SRC="$SCRIPT_DIR/port-filter.sh"
-REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main}"
-SCRIPT_URL="$REPO_BASE/port-filter.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/main/port-filter.sh"
+INSTALL_PATH="/usr/local/bin/port-filter"
 
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-BLUE='\033[1;34m'
-NC='\033[0m'
+echo -e "\033[1;34m[1/3] 下载主脚本...\033[0m"
+curl -sL "$SCRIPT_URL" -o "$INSTALL_PATH"
+chmod +x "$INSTALL_PATH"
 
-log() {
-    local color="$1"; shift
-    echo -e "${color}$*${NC}"
-}
+echo -e "\033[1;32m✓ 下载完成，脚本已安装到：$INSTALL_PATH\033[0m"
 
-download_remote_script() {
-    local tmpfile
-    tmpfile="$(mktemp)"
-    if curl -fsSL "$SCRIPT_URL" -o "$tmpfile"; then
-        echo "$tmpfile"
-        return 0
-    else
-        rm -f "$tmpfile"
-        return 1
-    fi
-}
-
-if [[ $EUID -ne 0 ]]; then
-    log "$RED" "请使用 root 权限运行此安装脚本"
-    exit 1
-fi
-
-log "$BLUE" "[1/4] 准备主脚本"
-SOURCE_PATH=""
-if [[ -f "$SCRIPT_SRC" ]]; then
-    SOURCE_PATH="$SCRIPT_SRC"
-    log "$GREEN" "检测到本地 port-filter.sh，将使用本地版本"
+echo -e "\033[1;34m[2/3] 检查依赖...\033[0m"
+if ! command -v ipset &>/dev/null || ! command -v iptables &>/dev/null; then
+    apt-get update -qq
+    apt-get install -y ipset iptables-persistent curl > /dev/null 2>&1
+    echo -e "\033[1;32m✓ 依赖已安装\033[0m"
 else
-    if SOURCE_PATH="$(download_remote_script)"; then
-        log "$GREEN" "已从仓库下载最新 port-filter.sh"
-    else
-        log "$RED" "无法获取 port-filter.sh，请检查网络连接或脚本地址"
-        exit 1
-    fi
+    echo -e "\033[1;32m✓ 依赖已存在\033[0m"
 fi
 
-log "$BLUE" "[2/4] 安装主脚本到 $TARGET"
-install -m 0755 "$SOURCE_PATH" "$TARGET"
-if [[ "$SOURCE_PATH" != "$SCRIPT_SRC" ]]; then
-    rm -f "$SOURCE_PATH"
-fi
-log "$GREEN" "安装完成"
-
-log "$BLUE" "[3/4] 检查依赖"
-if ! command -v ipset >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-        DEBIAN_FRONTEND=noninteractive apt-get install -y ipset iptables curl >/dev/null 2>&1 || true
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y ipset iptables curl >/dev/null 2>&1 || true
-    fi
-fi
-log "$GREEN" "依赖检测完成"
-
-log "$BLUE" "[4/4] 启动 Port Filter Script"
-"$TARGET"
+echo -e "\033[1;34m[3/3] 启动防火墙菜单...\033[0m"
+sudo bash "$INSTALL_PATH"
