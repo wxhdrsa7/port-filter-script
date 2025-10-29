@@ -37,6 +37,107 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# 检查命令是否存在
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+detect_package_manager() {
+    if command_exists apt-get; then
+        echo "apt"
+    elif command_exists dnf; then
+        echo "dnf"
+    elif command_exists yum; then
+        echo "yum"
+    elif command_exists pacman; then
+        echo "pacman"
+    else
+        echo ""
+    fi
+}
+
+package_for_command() {
+    local cmd="$1" pm="$2"
+    case "$pm" in
+        apt)
+            case "$cmd" in
+                crontab) echo "cron" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        yum|dnf)
+            case "$cmd" in
+                crontab) echo "cronie" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        pacman)
+            case "$cmd" in
+                crontab) echo "cronie" ;;
+                iptables) echo "iptables-nft" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+install_packages() {
+    local pm="$1"; shift
+    local packages=("$@")
+    [[ ${#packages[@]} -eq 0 ]] && return 0
+
+    case "$pm" in
+        apt)
+            log "$BLUE" "正在安装依赖: ${packages[*]}"
+            if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
+                log "$YELLOW" "apt-get 更新失败，请检查网络或软件源"
+            fi
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}" >/dev/null 2>&1; then
+                log "$GREEN" "依赖安装完成"
+                return 0
+            fi
+            ;;
+        yum)
+            log "$BLUE" "正在安装依赖: ${packages[*]}"
+            if yum install -y "${packages[@]}" >/dev/null 2>&1; then
+                log "$GREEN" "依赖安装完成"
+                return 0
+            fi
+            ;;
+        dnf)
+            log "$BLUE" "正在安装依赖: ${packages[*]}"
+            if dnf install -y "${packages[@]}" >/dev/null 2>&1; then
+                log "$GREEN" "依赖安装完成"
+                return 0
+            fi
+            ;;
+        pacman)
+            log "$BLUE" "正在安装依赖: ${packages[*]}"
+            if pacman -Sy --noconfirm "${packages[@]}" >/dev/null 2>&1; then
+                log "$GREEN" "依赖安装完成"
+                return 0
+            fi
+            ;;
+    esac
+
+    log "$YELLOW" "自动安装失败，请手动安装: ${packages[*]}"
+    return 1
+}
+
+collect_missing_dependencies() {
+    local deps=("$@")
+    local missing=()
+    for dep in "${deps[@]}"; do
+        if ! command_exists "$dep"; then
+            missing+=("$dep")
+        fi
+    done
+    echo "${missing[*]}"
+}
+
 log "$BLUE" "[1/4] 准备主脚本"
 SOURCE_PATH=""
 if [[ -f "$SCRIPT_SRC" ]]; then
@@ -59,46 +160,30 @@ fi
 log "$GREEN" "安装完成"
 
 log "$BLUE" "[3/4] 检查依赖"
-deps=(ipset iptables curl)
-missing=()
-for dep in "${deps[@]}"; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-        missing+=("$dep")
-    fi
-done
+deps=(ipset iptables curl crontab)
+missing_cmds=($(collect_missing_dependencies "${deps[@]}"))
 
-if [[ ${#missing[@]} -gt 0 ]]; then
-    if command -v apt-get >/dev/null 2>&1; then
-        log "$BLUE" "正在安装依赖: ${missing[*]}"
-        if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
-            log "$YELLOW" "apt-get 更新失败，请检查网络或软件源"
-        fi
-        if DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1; then
-            log "$GREEN" "依赖安装完成"
-        else
-            log "$YELLOW" "自动安装失败，请手动安装: ${missing[*]}"
-        fi
-    elif command -v yum >/dev/null 2>&1; then
-        log "$BLUE" "正在安装依赖: ${missing[*]}"
-        if yum install -y "${missing[@]}" >/dev/null 2>&1; then
-            log "$GREEN" "依赖安装完成"
-        else
-            log "$YELLOW" "自动安装失败，请手动安装: ${missing[*]}"
-        fi
+if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+    pm="$(detect_package_manager)"
+    packages=()
+    if [[ -n "$pm" ]]; then
+        for cmd in "${missing_cmds[@]}"; do
+            pkg="$(package_for_command "$cmd" "$pm")"
+            if [[ -n "$pkg" ]]; then
+                if [[ " ${packages[*]} " != *" $pkg "* ]]; then
+                    packages+=("$pkg")
+                fi
+            fi
+        done
+        install_packages "$pm" "${packages[@]}" || true
     else
-        log "$YELLOW" "检测到缺失依赖: ${missing[*]}，请手动安装后重试"
+        log "$YELLOW" "检测到缺失依赖: ${missing_cmds[*]}，请手动安装后重试"
     fi
 fi
 
-missing=()
-for dep in "${deps[@]}"; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-        missing+=("$dep")
-    fi
-done
-
-if [[ ${#missing[@]} -gt 0 ]]; then
-    log "$RED" "缺少依赖: ${missing[*]}。请手动安装后重新运行安装脚本"
+missing_cmds=($(collect_missing_dependencies "${deps[@]}"))
+if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+    log "$RED" "缺少依赖: ${missing_cmds[*]}。请手动安装后重新运行安装脚本"
     exit 1
 fi
 

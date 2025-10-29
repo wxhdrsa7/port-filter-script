@@ -57,6 +57,102 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+detect_package_manager() {
+    if command_exists apt-get; then
+        echo "apt"
+    elif command_exists dnf; then
+        echo "dnf"
+    elif command_exists yum; then
+        echo "yum"
+    elif command_exists pacman; then
+        echo "pacman"
+    else
+        echo ""
+    fi
+}
+
+package_for_command() {
+    local cmd="$1" pm="$2"
+    case "$pm" in
+        apt)
+            case "$cmd" in
+                crontab) echo "cron" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        yum|dnf)
+            case "$cmd" in
+                crontab) echo "cronie" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        pacman)
+            case "$cmd" in
+                crontab) echo "cronie" ;;
+                iptables) echo "iptables-nft" ;;
+                *) echo "$cmd" ;;
+            esac
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+install_packages() {
+    local pm="$1"; shift
+    local packages=("$@")
+    [[ ${#packages[@]} -eq 0 ]] && return 0
+
+    case "$pm" in
+        apt)
+            log INFO "正在安装依赖: ${packages[*]}"
+            if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
+                log WARN "apt-get 更新失败，请检查网络或软件源"
+            fi
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}" >/dev/null 2>&1; then
+                log SUCCESS "依赖安装完成"
+                return 0
+            fi
+            ;;
+        yum)
+            log INFO "正在安装依赖: ${packages[*]}"
+            if yum install -y "${packages[@]}" >/dev/null 2>&1; then
+                log SUCCESS "依赖安装完成"
+                return 0
+            fi
+            ;;
+        dnf)
+            log INFO "正在安装依赖: ${packages[*]}"
+            if dnf install -y "${packages[@]}" >/dev/null 2>&1; then
+                log SUCCESS "依赖安装完成"
+                return 0
+            fi
+            ;;
+        pacman)
+            log INFO "正在安装依赖: ${packages[*]}"
+            if pacman -Sy --noconfirm "${packages[@]}" >/dev/null 2>&1; then
+                log SUCCESS "依赖安装完成"
+                return 0
+            fi
+            ;;
+    esac
+
+    log WARN "自动安装失败，请手动安装: ${packages[*]}"
+    return 1
+}
+
+collect_missing_dependencies() {
+    local deps=("$@")
+    local missing=()
+    for dep in "${deps[@]}"; do
+        if ! command_exists "$dep"; then
+            missing+=("$dep")
+        fi
+    done
+    echo "${missing[*]}"
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log ERROR "请使用 root 权限运行此脚本"
@@ -73,47 +169,32 @@ init_environment() {
 }
 
 install_dependencies() {
-    local deps=(ipset iptables curl)
-    local missing=()
+    local deps=(ipset iptables curl crontab)
+    local missing_cmds=($(collect_missing_dependencies "${deps[@]}"))
 
-    for dep in "${deps[@]}"; do
-        if ! command_exists "$dep"; then
-            missing+=("$dep")
-        fi
-    done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        if command_exists apt-get; then
-            log INFO "正在安装依赖: ${missing[*]}"
-            if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
-                log WARN "apt-get 更新失败，请检查网络或软件源"
-            fi
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1; then
-                log SUCCESS "依赖安装完成"
-            else
-                log WARN "自动安装失败，请手动安装: ${missing[*]}"
-            fi
-        elif command_exists yum; then
-            log INFO "正在安装依赖: ${missing[*]}"
-            if yum install -y "${missing[@]}" >/dev/null 2>&1; then
-                log SUCCESS "依赖安装完成"
-            else
-                log WARN "自动安装失败，请手动安装: ${missing[*]}"
-            fi
+    if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+        local pm
+        local -a packages=()
+        pm="$(detect_package_manager)"
+        if [[ -n "$pm" ]]; then
+            local cmd pkg
+            for cmd in "${missing_cmds[@]}"; do
+                pkg="$(package_for_command "$cmd" "$pm")"
+                if [[ -n "$pkg" ]]; then
+                    if [[ " ${packages[*]} " != *" $pkg "* ]]; then
+                        packages+=("$pkg")
+                    fi
+                fi
+            done
+            install_packages "$pm" "${packages[@]}" || true
         else
-            log WARN "检测到缺失依赖: ${missing[*]}，请手动安装"
+            log WARN "检测到缺失依赖: ${missing_cmds[*]}，请手动安装"
         fi
     fi
 
-    missing=()
-    for dep in "${deps[@]}"; do
-        if ! command_exists "$dep"; then
-            missing+=("$dep")
-        fi
-    done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log ERROR "缺少依赖: ${missing[*]}。请安装相关软件包后重新运行脚本"
+    missing_cmds=($(collect_missing_dependencies "${deps[@]}"))
+    if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+        log ERROR "缺少依赖: ${missing_cmds[*]}。请安装相关软件包后重新运行脚本"
         exit 1
     fi
 }
@@ -144,9 +225,7 @@ save_config() {
 }
 
 ensure_ipset() {
-    if ! ipset list "$CN_IPSET_NAME" >/dev/null 2>&1; then
-        ipset create "$CN_IPSET_NAME" hash:net family inet maxelem 131072
-    fi
+    ipset create "$CN_IPSET_NAME" hash:net family inet maxelem 131072 -exist
 }
 
 update_cn_ipset() {
@@ -370,6 +449,8 @@ set_auto_update() {
     cat <<CRON > "$AUTO_UPDATE_CRON"
 $minute $hour * * * root $SCRIPT_PATH --cron-update >> $AUTO_UPDATE_LOG 2>&1
 CRON
+
+    chmod 0644 "$AUTO_UPDATE_CRON"
 
     log SUCCESS "自动更新时间已设置为 $hour:$minute"
 }

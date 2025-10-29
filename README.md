@@ -29,7 +29,7 @@ bash <(curl -sL https://raw.githubusercontent.com/wxhdrsa7/port-filter-script/ma
 
 安装脚本会将 `port-filter.sh` 安装到 `/usr/local/bin/port-filter` 并立即启动交互界面。
 
-> 依赖说明：脚本运行需要 `ipset`、`iptables`、`curl`。安装器会尝试自动安装缺失的软件包，如自动安装失败请手动安装后重试。
+> 依赖说明：脚本运行需要 `ipset`、`iptables`、`curl`、`cron/cronie`。安装器会尝试自动安装缺失的软件包，如自动安装失败请手动安装后重试。
 
 ## 🕹 使用指南
 1. 「更新国内 IP 库」：从多个数据源下载并写入 `ipset`。
