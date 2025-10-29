@@ -1,446 +1,358 @@
 #!/bin/bash
-# port-filter.sh - 端口访问控制脚本（国内来源）
-# 功能：
-#   1. 指定端口禁止中国大陆来源访问
-#   2. 指定端口仅允许中国大陆来源访问
-#   3. 支持 TCP / UDP / 双协议
-#   4. 支持多源国内 IP 列表 + 定时更新
-#   5. SSH 终端彩色交互界面
+# port_filter.sh - 端口访问控制一键脚本
+# 支持：IP地域过滤、端口屏蔽/放行、TCP/UDP协议控制
 
-set -euo pipefail
-
-VERSION="3.0.0"
-if command -v realpath >/dev/null 2>&1; then
-    SCRIPT_PATH="$(realpath "$0")"
-else
-    SCRIPT_PATH="$(readlink -f "$0")"
-fi
-SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+VERSION="1.0.0"
 CONFIG_DIR="/etc/port-filter"
-RULES_FILE="$CONFIG_DIR/rules.conf"
-CACHE_DIR="$CONFIG_DIR/cache"
-AUTO_UPDATE_CRON="/etc/cron.d/port-filter"
-AUTO_UPDATE_LOG="$CONFIG_DIR/auto-update.log"
-CN_IPSET_NAME="pf_cn_ipv4"
-IPTABLES_CHAIN="PORT_FILTER"
+CONFIG_FILE="$CONFIG_DIR/config.conf"
+IPSET_NAME="china"
 
-CN_IP_SOURCES=(
-    "https://raw.githubusercontent.com/metowolf/iplist/master/data/cn/china.txt"
-    "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
-    "https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china.txt"
-)
-
-RED='\033[1;31m'
-GREEN='\033[1;32m'
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-CYAN='\033[1;36m'
-NC='\033[0m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-RULES=()
-AUTO_UPDATE_TIME=""
-
-log() {
-    local level="$1"; shift
-    local color
-    case "$level" in
-        INFO) color="$BLUE" ;;
-        SUCCESS) color="$GREEN" ;;
-        WARN) color="$YELLOW" ;;
-        ERROR) color="$RED" ;;
-        *) color="$NC" ;;
-    esac
-    echo -e "${color}[$level]${NC} $*"
-}
-
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
+# 检查root权限
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log ERROR "请使用 root 权限运行此脚本"
+    if [ "$EUID" -ne 0 ]; then 
+        echo -e "${RED}错误：请使用 root 权限运行此脚本${NC}"
         exit 1
     fi
 }
 
-init_environment() {
-    mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
-    touch "$RULES_FILE"
-    if [[ ! -f "$AUTO_UPDATE_LOG" ]]; then
-        touch "$AUTO_UPDATE_LOG"
-    fi
-}
-
+# 安装依赖
 install_dependencies() {
-    local missing=()
-    local deps=(ipset iptables curl)
-
-    for dep in "${deps[@]}"; do
-        if ! command_exists "$dep"; then
-            missing+=("$dep")
-        fi
-    done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        if command_exists apt-get; then
-            log INFO "正在安装依赖: ${missing[*]}"
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1; then
-                log SUCCESS "依赖安装完成"
-            else
-                log WARN "自动安装失败，请手动安装: ${missing[*]}"
-            fi
-        elif command_exists yum; then
-            log INFO "正在安装依赖: ${missing[*]}"
-            if yum install -y "${missing[@]}" >/dev/null 2>&1; then
-                log SUCCESS "依赖安装完成"
-            else
-                log WARN "自动安装失败，请手动安装: ${missing[*]}"
-            fi
-        else
-            log WARN "检测到缺失依赖: ${missing[*]}，请手动安装"
-        fi
+    echo -e "${BLUE}[1/3] 检查并安装依赖...${NC}"
+    
+    if ! command -v ipset &> /dev/null; then
+        apt-get update -qq
+        apt-get install -y ipset iptables-persistent curl > /dev/null 2>&1
     fi
+    
+    # 创建配置目录
+    mkdir -p "$CONFIG_DIR"
+    
+    echo -e "${GREEN}✓ 依赖安装完成${NC}"
 }
 
-load_config() {
-    RULES=()
-    AUTO_UPDATE_TIME=""
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ -z "$line" || "$line" =~ ^# ]] && continue
-        if [[ "$line" == RULE* ]]; then
-            RULES+=("${line#RULE }")
-        elif [[ "$line" == AUTO_UPDATE* ]]; then
-            AUTO_UPDATE_TIME="${line#AUTO_UPDATE }"
-        fi
-    done < "$RULES_FILE"
-}
-
-save_config() {
-    {
-        for rule in "${RULES[@]}"; do
-            echo "RULE $rule"
-        done
-        if [[ -n "$AUTO_UPDATE_TIME" ]]; then
-            echo "AUTO_UPDATE $AUTO_UPDATE_TIME"
-        fi
-    } > "$RULES_FILE"
-}
-
-ensure_ipset() {
-    if ! ipset list "$CN_IPSET_NAME" >/dev/null 2>&1; then
-        ipset create "$CN_IPSET_NAME" hash:net family inet maxelem 131072
-    fi
-}
-
-update_cn_ipset() {
-    ensure_ipset
-
-    local tmp_file
-    tmp_file=$(mktemp)
-    >"$tmp_file"
-
-    log INFO "正在下载国内 IP 数据..."
-    local success=false
-    for url in "${CN_IP_SOURCES[@]}"; do
-        if curl -fsSL "$url" | sed 's/#.*//' | sed '/^\s*$/d' >>"$tmp_file"; then
-            success=true
-        else
-            log WARN "下载失败: $url"
-        fi
-    done
-
-    if [[ "$success" == false ]]; then
-        log ERROR "所有国内 IP 数据源下载失败"
-        rm -f "$tmp_file"
+# 下载中国IP列表
+download_china_ip() {
+    echo -e "${BLUE}[2/3] 下载中国IP列表...${NC}"
+    
+    # 销毁旧的ipset
+    ipset destroy "$IPSET_NAME" 2>/dev/null
+    
+    # 创建新的ipset
+    ipset create "$IPSET_NAME" hash:net maxelem 70000
+    
+    # 下载IP列表
+    TEMP_FILE=$(mktemp)
+    if curl -sL --max-time 60 "https://raw.githubusercontent.com/metowolf/iplist/master/data/country/CN.txt" -o "$TEMP_FILE"; then
+        COUNT=0
+        while read -r ip; do
+            if [ -n "$ip" ]; then
+                ipset add "$IPSET_NAME" "$ip" 2>/dev/null && ((COUNT++))
+            fi
+        done < "$TEMP_FILE"
+        rm -f "$TEMP_FILE"
+        echo -e "${GREEN}✓ 成功导入 $COUNT 条IP规则${NC}"
+    else
+        echo -e "${RED}✗ IP列表下载失败${NC}"
+        rm -f "$TEMP_FILE"
         return 1
     fi
-
-    sort -u "$tmp_file" -o "$tmp_file"
-    cp "$tmp_file" "$CACHE_DIR/cn_ipv4.list"
-
-    {
-        echo "create $CN_IPSET_NAME hash:net family inet maxelem 131072 -exist"
-        echo "flush $CN_IPSET_NAME"
-        while IFS= read -r cidr; do
-            [[ -z "$cidr" ]] && continue
-            echo "add $CN_IPSET_NAME $cidr"
-        done < "$tmp_file"
-    } | ipset restore
-
-    rm -f "$tmp_file"
-    local count
-    count=$(wc -l < "$CACHE_DIR/cn_ipv4.list" | tr -d '[:space:]')
-    log SUCCESS "国内 IP 库已更新，共收录 ${count} 条记录"
 }
 
-ensure_iptables_chain() {
-    if ! iptables -nL "$IPTABLES_CHAIN" >/dev/null 2>&1; then
-        iptables -N "$IPTABLES_CHAIN"
-    fi
-    if ! iptables -C INPUT -j "$IPTABLES_CHAIN" >/dev/null 2>&1; then
-        iptables -I INPUT 1 -j "$IPTABLES_CHAIN"
-    fi
+# 保存配置
+save_config() {
+    local port=$1
+    local protocol=$2
+    local mode=$3
+    local action=$4
+    
+    echo "${port}|${protocol}|${mode}|${action}" >> "$CONFIG_FILE"
 }
 
+# 清除端口的所有规则
+clear_port_rules() {
+    local port=$1
+    
+    # 清除所有相关规则
+    iptables -D INPUT -p tcp --dport "$port" -m set --match-set "$IPSET_NAME" src -j DROP 2>/dev/null
+    iptables -D INPUT -p tcp --dport "$port" -m set --match-set "$IPSET_NAME" src -j ACCEPT 2>/dev/null
+    iptables -D INPUT -p tcp --dport "$port" -j DROP 2>/dev/null
+    iptables -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+    
+    iptables -D INPUT -p udp --dport "$port" -m set --match-set "$IPSET_NAME" src -j DROP 2>/dev/null
+    iptables -D INPUT -p udp --dport "$port" -m set --match-set "$IPSET_NAME" src -j ACCEPT 2>/dev/null
+    iptables -D INPUT -p udp --dport "$port" -j DROP 2>/dev/null
+    iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null
+}
+
+# 应用规则
 apply_rule() {
-    local action="$1" port="$2" protocol="$3"
-
-    local protocols=()
-    case "$protocol" in
-        tcp|TCP) protocols=(tcp) ;;
-        udp|UDP) protocols=(udp) ;;
-        both|BOTH) protocols=(tcp udp) ;;
-        *) log WARN "未知协议: $protocol"; return ;;
-    esac
-
-    for proto in "${protocols[@]}"; do
-        case "$action" in
-            block_cn)
-                iptables -A "$IPTABLES_CHAIN" -p "$proto" --dport "$port" -m set --match-set "$CN_IPSET_NAME" src -j DROP
-                ;;
-            allow_cn_only)
-                iptables -A "$IPTABLES_CHAIN" -p "$proto" --dport "$port" -m set ! --match-set "$CN_IPSET_NAME" src -j DROP
-                ;;
-        esac
-    done
-}
-
-apply_all_rules() {
-    ensure_ipset
-    ensure_iptables_chain
-    iptables -F "$IPTABLES_CHAIN"
-
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r action port protocol <<<"$rule"
-        apply_rule "$action" "$port" "$protocol"
-    done
-
-    log SUCCESS "防火墙规则已应用"
-}
-
-list_rules() {
-    if [[ ${#RULES[@]} -eq 0 ]]; then
-        echo -e "${YELLOW}暂无规则${NC}"
-        return
-    fi
-
-    printf "${CYAN}%-4s %-14s %-8s %-8s${NC}\n" "编号" "策略" "端口" "协议"
-    local idx=1
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r action port protocol <<<"$rule"
-        local action_text display_protocol
-        case "$action" in
-            block_cn) action_text="阻止国内" ;;
-            allow_cn_only) action_text="仅国内" ;;
-            *) action_text="$action" ;;
-        esac
-        display_protocol=$(echo "$protocol" | tr '[:lower:]' '[:upper:]')
-        printf "%s%-4d%s %-14s %-8s %-8s\n" "$GREEN" "$idx" "$NC" "$action_text" "$port" "$display_protocol"
-        ((idx++))
-    done
-}
-
-prompt_port() {
-    local port
-    while true; do
-        read -rp "请输入端口 (1-65535): " port
-        if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
-            echo "$port"
-            return
+    local port=$1
+    local protocol=$2
+    local mode=$3
+    
+    # 先清除该端口的旧规则
+    clear_port_rules "$port"
+    
+    if [ "$protocol" = "tcp" ] || [ "$protocol" = "both" ]; then
+        if [ "$mode" = "blacklist" ]; then
+            # 黑名单：阻止中国IP
+            iptables -I INPUT -p tcp --dport "$port" -m set --match-set "$IPSET_NAME" src -j DROP
+            echo -e "${GREEN}✓ TCP端口 $port: 已设置黑名单（阻止中国IP）${NC}"
+        elif [ "$mode" = "whitelist" ]; then
+            # 白名单：仅允许中国IP
+            iptables -I INPUT -p tcp --dport "$port" -m set --match-set "$IPSET_NAME" src -j ACCEPT
+            iptables -I INPUT -p tcp --dport "$port" -j DROP
+            echo -e "${GREEN}✓ TCP端口 $port: 已设置白名单（仅允许中国IP）${NC}"
         fi
-        log WARN "端口号无效"
-    done
-}
-
-prompt_protocol() {
-    local choice
-    echo "请选择协议:"
-    echo "  1) TCP"
-    echo "  2) UDP"
-    echo "  3) TCP + UDP"
-    while true; do
-        read -rp "请输入序号: " choice
-        case "$choice" in
-            1) echo "tcp"; return ;;
-            2) echo "udp"; return ;;
-            3) echo "both"; return ;;
-        esac
-        log WARN "无效选择"
-    done
-}
-
-add_rule() {
-    local action
-    echo "请选择策略类型:"
-    echo "  1) 阻止中国大陆访问"
-    echo "  2) 仅允许中国大陆访问"
-    local choice
-    while true; do
-        read -rp "请输入序号: " choice
-        case "$choice" in
-            1) action="block_cn"; break ;;
-            2) action="allow_cn_only"; break ;;
-        esac
-        log WARN "无效选择"
-    done
-
-    local port protocol
-    port=$(prompt_port)
-    protocol=$(prompt_protocol)
-
-    local new_rule="$action|$port|$protocol"
-
-    for existing in "${RULES[@]}"; do
-        if [[ "$existing" == "$new_rule" ]]; then
-            log WARN "该规则已存在"
-            return
+    fi
+    
+    if [ "$protocol" = "udp" ] || [ "$protocol" = "both" ]; then
+        if [ "$mode" = "blacklist" ]; then
+            iptables -I INPUT -p udp --dport "$port" -m set --match-set "$IPSET_NAME" src -j DROP
+            echo -e "${GREEN}✓ UDP端口 $port: 已设置黑名单（阻止中国IP）${NC}"
+        elif [ "$mode" = "whitelist" ]; then
+            iptables -I INPUT -p udp --dport "$port" -m set --match-set "$IPSET_NAME" src -j ACCEPT
+            iptables -I INPUT -p udp --dport "$port" -j DROP
+            echo -e "${GREEN}✓ UDP端口 $port: 已设置白名单（仅允许中国IP）${NC}"
         fi
+    fi
+}
+
+# 屏蔽端口
+block_port() {
+    local port=$1
+    local protocol=$2
+    
+    clear_port_rules "$port"
+    
+    if [ "$protocol" = "tcp" ] || [ "$protocol" = "both" ]; then
+        iptables -I INPUT -p tcp --dport "$port" -j DROP
+        echo -e "${GREEN}✓ 已屏蔽 TCP 端口 $port${NC}"
+    fi
+    
+    if [ "$protocol" = "udp" ] || [ "$protocol" = "both" ]; then
+        iptables -I INPUT -p udp --dport "$port" -j DROP
+        echo -e "${GREEN}✓ 已屏蔽 UDP 端口 $port${NC}"
+    fi
+}
+
+# 放行端口
+allow_port() {
+    local port=$1
+    local protocol=$2
+    
+    clear_port_rules "$port"
+    
+    if [ "$protocol" = "tcp" ] || [ "$protocol" = "both" ]; then
+        iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+        echo -e "${GREEN}✓ 已放行 TCP 端口 $port${NC}"
+    fi
+    
+    if [ "$protocol" = "udp" ] || [ "$protocol" = "both" ]; then
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT
+        echo -e "${GREEN}✓ 已放行 UDP 端口 $port${NC}"
+    fi
+}
+
+# 查看当前规则
+show_rules() {
+    echo -e "${BLUE}==================== 当前防火墙规则 ====================${NC}"
+    echo -e "${YELLOW}TCP 规则：${NC}"
+    iptables -L INPUT -n -v --line-numbers | grep "tcp dpt:" | head -20
+    echo ""
+    echo -e "${YELLOW}UDP 规则：${NC}"
+    iptables -L INPUT -n -v --line-numbers | grep "udp dpt:" | head -20
+    echo -e "${BLUE}=======================================================${NC}"
+}
+
+# 保存规则
+save_rules() {
+    echo -e "${BLUE}[3/3] 保存防火墙规则...${NC}"
+    netfilter-persistent save > /dev/null 2>&1
+    echo -e "${GREEN}✓ 规则已保存${NC}"
+}
+
+# 清除所有规则
+clear_all_rules() {
+    echo -e "${YELLOW}正在清除所有规则...${NC}"
+    
+    # 清除所有与ipset相关的规则
+    iptables -S INPUT | grep "$IPSET_NAME" | cut -d " " -f 2- | while read -r rule; do
+        iptables -D INPUT $rule 2>/dev/null
     done
-
-    RULES+=("$new_rule")
-    save_config
-    apply_all_rules
-    log SUCCESS "规则已添加"
+    
+    # 删除ipset
+    ipset destroy "$IPSET_NAME" 2>/dev/null
+    
+    # 清除配置文件
+    rm -f "$CONFIG_FILE"
+    
+    save_rules
+    echo -e "${GREEN}✓ 所有规则已清除${NC}"
 }
 
-remove_rule() {
-    if [[ ${#RULES[@]} -eq 0 ]]; then
-        log WARN "暂无规则可删除"
-        return
-    fi
-    list_rules
-    local idx
-    while true; do
-        read -rp "请输入要删除的编号: " idx
-        if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#RULES[@]} )); then
-            break
-        fi
-        log WARN "无效编号"
-    done
-    local array_index=$((idx - 1))
-    unset 'RULES[array_index]'
-    if [[ ${#RULES[@]} -gt 0 ]]; then
-        RULES=("${RULES[@]}")
-    else
-        RULES=()
-    fi
-    save_config
-    apply_all_rules
-    log SUCCESS "规则已删除"
-}
-
-set_auto_update() {
-    read -rp "请输入自动更新时间 (HH:MM，留空关闭): " input
-    if [[ -z "$input" ]]; then
-        AUTO_UPDATE_TIME=""
-        rm -f "$AUTO_UPDATE_CRON"
-        save_config
-        log SUCCESS "已关闭自动更新"
-        return
-    fi
-
-    if [[ ! "$input" =~ ^([01]?[0-9]|2[0-3]):([0-5][0-9])$ ]]; then
-        log WARN "时间格式错误"
-        return
-    fi
-
-    AUTO_UPDATE_TIME="$input"
-    save_config
-
-    local minute="${input##*:}"
-    local hour="${input%%:*}"
-
-    cat <<CRON > "$AUTO_UPDATE_CRON"
-$minute $hour * * * root $SCRIPT_PATH --cron-update >> $AUTO_UPDATE_LOG 2>&1
-CRON
-
-    log SUCCESS "自动更新时间已设置为 $hour:$minute"
-}
-
-show_banner() {
+# 主菜单
+show_menu() {
     clear
-    cat <<BANNER
-${CYAN}╔══════════════════════════════════════════════╗
-║        Port Filter Script v${VERSION}        ║
-║   国内访问控制 · SSH 终端友好 · 彩色界面    ║
-╚══════════════════════════════════════════════╝${NC}
-BANNER
+    echo -e "${BLUE}╔════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║      端口访问控制脚本 v${VERSION}              ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${GREEN}1.${NC} IP地域过滤（黑名单/白名单）"
+    echo -e "${GREEN}2.${NC} 屏蔽端口（完全阻止访问）"
+    echo -e "${GREEN}3.${NC} 放行端口（完全允许访问）"
+    echo -e "${GREEN}4.${NC} 查看当前规则"
+    echo -e "${GREEN}5.${NC} 清除所有规则"
+    echo -e "${GREEN}6.${NC} 更新中国IP列表"
+    echo -e "${GREEN}0.${NC} 退出"
+    echo ""
+    echo -ne "${YELLOW}请选择操作 [0-6]: ${NC}"
 }
 
-cn_entry_count() {
-    if [[ -f "$CACHE_DIR/cn_ipv4.list" ]]; then
-        wc -l < "$CACHE_DIR/cn_ipv4.list" | tr -d '[:space:]'
-    else
-        echo 0
+# IP地域过滤设置
+setup_geo_filter() {
+    echo -e "${BLUE}==================== IP地域过滤设置 ====================${NC}"
+    
+    # 检查是否已下载IP列表
+    if ! ipset list "$IPSET_NAME" &>/dev/null; then
+        download_china_ip
     fi
+    
+    read -p "请输入端口号: " port
+    
+    echo "选择协议："
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. TCP + UDP"
+    read -p "请选择 [1-3]: " proto_choice
+    
+    case $proto_choice in
+        1) protocol="tcp" ;;
+        2) protocol="udp" ;;
+        3) protocol="both" ;;
+        *) echo -e "${RED}无效选择${NC}"; return ;;
+    esac
+    
+    echo "选择模式："
+    echo "1. 黑名单（阻止中国IP，允许其他地区）"
+    echo "2. 白名单（仅允许中国IP，阻止其他地区）"
+    read -p "请选择 [1-2]: " mode_choice
+    
+    case $mode_choice in
+        1) mode="blacklist" ;;
+        2) mode="whitelist" ;;
+        *) echo -e "${RED}无效选择${NC}"; return ;;
+    esac
+    
+    apply_rule "$port" "$protocol" "$mode"
+    save_config "$port" "$protocol" "$mode" "geo_filter"
+    save_rules
 }
 
-main_menu() {
-    while true; do
-        show_banner
-        echo "当前国内 IP 数据条目: $(cn_entry_count)"
-        echo "自动更新时间: ${AUTO_UPDATE_TIME:-未设置}"
-        echo ""
-        echo "${GREEN}1${NC}. 更新国内 IP 库"
-        echo "${GREEN}2${NC}. 查看现有规则"
-        echo "${GREEN}3${NC}. 新增规则"
-        echo "${GREEN}4${NC}. 删除规则"
-        echo "${GREEN}5${NC}. 设置自动更新"
-        echo "${GREEN}0${NC}. 退出"
-        echo ""
-        read -rp "请选择操作: " choice
-        case "$choice" in
-            1) update_cn_ipset; read -rp "按回车继续..." _ ;;
-            2) list_rules; read -rp "按回车继续..." _ ;;
-            3) add_rule; read -rp "按回车继续..." _ ;;
-            4) remove_rule; read -rp "按回车继续..." _ ;;
-            5) set_auto_update; read -rp "按回车继续..." _ ;;
-            0) exit 0 ;;
-            *) log WARN "无效选择"; sleep 1 ;;
-        esac
-    done
+# 屏蔽端口设置
+setup_block_port() {
+    echo -e "${BLUE}==================== 屏蔽端口 ====================${NC}"
+    
+    read -p "请输入要屏蔽的端口号: " port
+    
+    echo "选择协议："
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. TCP + UDP"
+    read -p "请选择 [1-3]: " proto_choice
+    
+    case $proto_choice in
+        1) protocol="tcp" ;;
+        2) protocol="udp" ;;
+        3) protocol="both" ;;
+        *) echo -e "${RED}无效选择${NC}"; return ;;
+    esac
+    
+    block_port "$port" "$protocol"
+    save_config "$port" "$protocol" "block" "block"
+    save_rules
 }
 
-cron_update() {
-    update_cn_ipset
-    load_config
-    apply_all_rules
-    log SUCCESS "定时任务已完成"
+# 放行端口设置
+setup_allow_port() {
+    echo -e "${BLUE}==================== 放行端口 ====================${NC}"
+    
+    read -p "请输入要放行的端口号: " port
+    
+    echo "选择协议："
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. TCP + UDP"
+    read -p "请选择 [1-3]: " proto_choice
+    
+    case $proto_choice in
+        1) protocol="tcp" ;;
+        2) protocol="udp" ;;
+        3) protocol="both" ;;
+        *) echo -e "${RED}无效选择${NC}"; return ;;
+    esac
+    
+    allow_port "$port" "$protocol"
+    save_config "$port" "$protocol" "allow" "allow"
+    save_rules
 }
 
-usage() {
-    cat <<HELP
-使用方法:
-  $SCRIPT_NAME             # 打开交互菜单
-  $SCRIPT_NAME --cron-update   # 定时任务：更新国内 IP 库并应用规则
-HELP
-}
-
+# 主程序
 main() {
     check_root
     install_dependencies
-    init_environment
-    load_config
-
-    case "${1:-}" in
-        --cron-update)
-            cron_update
-            ;;
-        --help|-h)
-            usage
-            ;;
-        "")
-            apply_all_rules
-            main_menu
-            ;;
-        *)
-            usage
-            exit 1
-            ;;
-    esac
+    
+    while true; do
+        show_menu
+        read choice
+        
+        case $choice in
+            1)
+                setup_geo_filter
+                read -p "按回车继续..."
+                ;;
+            2)
+                setup_block_port
+                read -p "按回车继续..."
+                ;;
+            3)
+                setup_allow_port
+                read -p "按回车继续..."
+                ;;
+            4)
+                show_rules
+                read -p "按回车继续..."
+                ;;
+            5)
+                read -p "确认清除所有规则？(y/N): " confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                    clear_all_rules
+                fi
+                read -p "按回车继续..."
+                ;;
+            6)
+                download_china_ip
+                save_rules
+                read -p "按回车继续..."
+                ;;
+            0)
+                echo -e "${GREEN}再见！${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}无效选择，请重试${NC}"
+                sleep 2
+                ;;
+        esac
+    done
 }
 
-main "$@"
+# 运行主程序
+main
