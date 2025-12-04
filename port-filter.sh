@@ -1,14 +1,14 @@
 #!/bin/bash
-# port-filter.sh - 端口访问控制一键脚本（增强版）
-# 支持：IP地域过滤、端口屏蔽/放行、TCP/UDP协议控制、白名单管理、规则库选择、自动更新计划
+# port-filter.sh - 端口访问控制一键脚本（IP 源规则库版）
+# 支持：IP地域过滤、端口屏蔽/放行、TCP/UDP协议控制、白名单管理、IP源规则库选择、自动更新计划
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 
 CONFIG_DIR="/etc/port-filter"
 RULES_FILE="$CONFIG_DIR/rules.conf"
 WHITELIST_FILE="$CONFIG_DIR/whitelist.conf"
 SETTINGS_FILE="$CONFIG_DIR/settings.conf"
-RULE_LIBRARIES_FILE="$CONFIG_DIR/active_libraries.conf"
+SOURCE_LIB_FILE="$CONFIG_DIR/ip_sources.conf"
 
 IPSET_NAME="china"
 IPSET_WHITE="whitelist"
@@ -17,6 +17,9 @@ CRON_FILE="/etc/cron.d/port-filter"
 LOG_FILE="/var/log/port-filter/update.log"
 
 APT_UPDATED=0
+
+# 当前脚本路径（给定时任务用）
+SCRIPT_PATH="$(readlink -f "$0")"
 
 # 颜色定义（兼容 SSH 终端）
 if command -v tput >/dev/null 2>&1 && [ -n "$TERM" ] && [ "$TERM" != "dumb" ]; then
@@ -39,7 +42,7 @@ else
     NC='\033[0m'
 fi
 
-# 多源中国 IP 列表
+# IP 源规则库（你说的“规则库”就是这里）
 IP_SOURCES=(
     "metowolf/IPList|https://raw.githubusercontent.com/metowolf/iplist/master/data/country/CN.txt"
     "17mon/ChinaIPList|https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
@@ -137,6 +140,18 @@ load_whitelist() {
     fi
 }
 
+# 初始化 IP 源规则库（默认启用全部内置源）
+init_ip_sources() {
+    mkdir -p "$CONFIG_DIR"
+    if [ ! -f "$SOURCE_LIB_FILE" ]; then
+        : > "$SOURCE_LIB_FILE"
+        for entry in "${IP_SOURCES[@]}"; do
+            IFS='|' read -r name url <<< "$entry"
+            echo "$name" >> "$SOURCE_LIB_FILE"
+        done
+    fi
+}
+
 # 添加 IP 到白名单
 add_whitelist_ip() {
     local ip="$1"
@@ -193,7 +208,7 @@ show_whitelist() {
     fi
 }
 
-# 下载中国 IP 列表
+# 下载中国 IP 列表（使用“已启用”的 IP 源规则库）
 download_china_ip() {
     print_info "正在下载中国IP列表..."
 
@@ -203,12 +218,39 @@ download_china_ip() {
         ipset flush "$IPSET_NAME"
     fi
 
+    # 读取当前启用的 IP 源规则库
+    local active_sources=()
+    if [ -f "$SOURCE_LIB_FILE" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            [[ "$line" =~ ^# ]] && continue
+            active_sources+=("$line")
+        done < "$SOURCE_LIB_FILE"
+    fi
+
     local total=0
     local success=0
 
-    for source in "${IP_SOURCES[@]}"; do
-        IFS='|' read -r name url <<< "$source"
-        print_info "正在从 $name 下载..."
+    for entry in "${IP_SOURCES[@]}"; do
+        IFS='|' read -r name url <<< "$entry"
+
+        # 判断该源是否启用
+        local use_this=0
+        if [ ${#active_sources[@]} -eq 0 ]; then
+            # 没配置时默认全部启用
+            use_this=1
+        else
+            for a in "${active_sources[@]}"; do
+                if [ "$a" = "$name" ]; then
+                    use_this=1
+                    break
+                fi
+            done
+        fi
+
+        [ "$use_this" -eq 0 ] && continue
+
+        print_info "正在从 $name 下载（$url）..."
 
         if curl -sL --connect-timeout 10 "$url" \
             | while read -r ip; do
@@ -227,11 +269,11 @@ download_china_ip() {
     done
 
     if [ "$success" -eq 0 ]; then
-        print_error "✗ 所有 IP 源均下载失败，请检查网络"
+        print_error "✗ 所有已启用的 IP 源下载失败，请检查网络或规则库配置"
         return 1
     fi
 
-    print_success "✓ 成功导入 ${total} 条 IP 规则"
+    print_success "✓ 成功导入 ${total} 条 IP 规则（来自 $success 个源）"
     return 0
 }
 
@@ -270,7 +312,7 @@ ensure_ipset_exists() {
     fi
 }
 
-# 应用地域规则（修正白名单顺序：先规则，后白名单）
+# 应用地域规则（先规则，再白名单；白名单优先）
 apply_rule() {
     local port=$1
     local protocol=$2
@@ -302,7 +344,7 @@ apply_rule() {
         fi
     fi
 
-    # 2. 最后插入白名单规则（后插入 → 规则链最上面 → 优先放行）
+    # 2. 再插入白名单（后插入 → 规则链最上面 → 优先放行）
     if [ "$protocol" = "tcp" ] || [ "$protocol" = "both" ]; then
         iptables -I INPUT -p tcp --dport "$port" -m set --match-set "$IPSET_WHITE" src -j ACCEPT
     fi
@@ -421,7 +463,7 @@ clear_all_rules() {
     rm -f "$RULES_FILE"
     rm -f "$SETTINGS_FILE"
     rm -f "$CRON_FILE"
-    rm -f "$RULE_LIBRARIES_FILE"
+    rm -f "$SOURCE_LIB_FILE"
 
     save_rules
     print_success "✓ 所有规则已清除"
@@ -446,9 +488,13 @@ setup_auto_update() {
         return 1
     fi
 
+    local minute hour
+    minute="${update_time#*:}"
+    hour="${update_time%:*}"
+
     cat > "$CRON_FILE" << EOF
 # port-filter 自动更新中国IP列表
-$update_time * * * root $SCRIPT_PATH --update-ip >> $LOG_FILE 2>&1
+$minute $hour * * * root $SCRIPT_PATH --update-ip >> $LOG_FILE 2>&1
 EOF
 
     reload_cron_service
@@ -481,121 +527,118 @@ update_china_ip() {
 }
 
 ########################################
-# 规则库相关：端口集合 + 启用/关闭
+# IP 源规则库管理
 ########################################
 
-get_rule_ports() {
-    local lib="$1"
-    case "$lib" in
-        common_attacks) echo "22 23 135 139 445 1433 3389" ;;
-        malware_ports)  echo "135 4444 5554 8866 9996 12345 27374" ;;
-        scan_detection) echo "1 7 9 11 15 21 25 111 135 139 445" ;;
-        web_services)   echo "80 443 8080 8888" ;;
-        database_ports) echo "3306 5432 1433 1521 27017" ;;
-        *) return 1 ;;
-    esac
-}
-
-show_active_libraries() {
-    print_info "当前已启用的规则库："
-    if [ -f "$RULE_LIBRARIES_FILE" ]; then
+show_ip_source_libraries() {
+    print_info "当前已启用的 IP 源规则库："
+    if [ -f "$SOURCE_LIB_FILE" ]; then
         local count=0
-        while IFS= read -r lib; do
-            [ -z "$lib" ] && continue
-            echo "  - $lib"
+        while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            echo "  - $name"
             ((count++))
-        done < "$RULE_LIBRARIES_FILE"
-        [ $count -eq 0 ] && print_warning "暂无已启用的规则库"
+        done < "$SOURCE_LIB_FILE"
+        [ $count -eq 0 ] && print_warning "暂无启用的 IP 源（将回退到内置默认全部）"
     else
-        print_warning "暂无已启用的规则库"
+        print_warning "还没有规则库配置文件（将回退到内置默认全部）"
     fi
 }
 
-enable_library() {
-    local lib="$1"
-    local ports
-    ports="$(get_rule_ports "$lib")" || {
-        print_error "未知规则库: $lib"
+enable_ip_source() {
+    local name="$1"
+
+    # 检查是否为内置源之一
+    local found=0
+    for entry in "${IP_SOURCES[@]}"; do
+        IFS='|' read -r n url <<< "$entry"
+        if [ "$n" = "$name" ]; then
+            found=1
+            break
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        print_error "未知 IP 源规则库: $name"
         return 1
-    }
+    fi
 
     mkdir -p "$CONFIG_DIR"
-    touch "$RULE_LIBRARIES_FILE"
+    touch "$SOURCE_LIB_FILE"
 
-    if grep -q "^$lib$" "$RULE_LIBRARIES_FILE" 2>/dev/null; then
-        print_warning "规则库 $lib 已启用"
+    if grep -q "^$name$" "$SOURCE_LIB_FILE" 2>/dev/null; then
+        print_warning "规则库 $name 已经启用"
         return 0
     fi
 
-    for p in $ports; do
-        # 使用 block_port：统一走端口屏蔽逻辑（白名单仍然优先）
-        block_port "$p" "both"
-        # 标记为库规则，方便在“查看已保存策略”里区分
-        echo "${p}|both|block|lib:${lib}" >> "$RULES_FILE"
-    done
-
-    echo "$lib" >> "$RULE_LIBRARIES_FILE"
-    save_rules
-    print_success "规则库 $lib 已启用"
+    echo "$name" >> "$SOURCE_LIB_FILE"
+    print_success "已启用 IP 源规则库: $name"
 }
 
-disable_library() {
-    local lib="$1"
-    local ports
-    ports="$(get_rule_ports "$lib")" || {
-        print_error "未知规则库: $lib"
-        return 1
-    }
+disable_ip_source() {
+    local name="$1"
 
-    if ! grep -q "^$lib$" "$RULE_LIBRARIES_FILE" 2>/dev/null; then
-        print_warning "规则库 $lib 未启用"
+    if [ ! -f "$SOURCE_LIB_FILE" ]; then
+        print_warning "规则库配置文件不存在"
         return 0
     fi
 
-    for p in $ports; do
-        # 简单处理：直接清除该端口所有规则
-        # 适合规则库一键开关的使用场景
-        clear_port_rules "$p"
-        # 删除保存文件中对应的库规则记录
-        sed -i "/^${p}|both|block|lib:${lib}\$/d" "$RULES_FILE" 2>/dev/null
-    done
+    if ! grep -q "^$name$" "$SOURCE_LIB_FILE" 2>/dev/null; then
+        print_warning "规则库 $name 当前未启用"
+        return 0
+    fi
 
-    sed -i "/^$lib\$/d" "$RULE_LIBRARIES_FILE" 2>/dev/null
-    save_rules
-    print_success "规则库 $lib 已关闭（相关端口规则已清除）"
+    sed -i "/^$name$/d" "$SOURCE_LIB_FILE" 2>/dev/null
+    print_success "已禁用 IP 源规则库: $name"
 }
 
-rule_library_menu() {
+reset_ip_sources_to_default() {
+    mkdir -p "$CONFIG_DIR"
+    : > "$SOURCE_LIB_FILE"
+    for entry in "${IP_SOURCES[@]}"; do
+        IFS='|' read -r name url <<< "$entry"
+        echo "$name" >> "$SOURCE_LIB_FILE"
+    done
+    print_success "已恢复默认：启用所有内置 IP 源规则库"
+}
+
+ip_source_library_menu() {
     while true; do
         clear
         print_title
         echo ""
-        print_info "规则库选择"
+        print_info "IP 源规则库选择（控制使用哪些中国IP数据源）"
         echo ""
-        show_active_libraries
+        show_ip_source_libraries
         echo ""
-        echo "可用规则库："
-        echo " 1) common_attacks    - 常见攻击端口"
-        echo " 2) malware_ports     - 已知恶意软件端口"
-        echo " 3) scan_detection    - 扫描检测端口"
-        echo " 4) web_services      - Web 服务端口"
-        echo " 5) database_ports    - 数据库端口"
+        echo "内置可用规则库（IP 源）："
+        local idx=1
+        for entry in "${IP_SOURCES[@]}"; do
+            IFS='|' read -r name url <<< "$entry"
+            echo "  $idx) $name"
+            echo "     $url"
+            ((idx++))
+        done
         echo ""
-        echo "a) 启用规则库（输入名称，如 common_attacks）"
-        echo "b) 关闭规则库（输入名称，如 web_services）"
-        echo "c) 返回主菜单"
+        echo "a) 启用某个规则库（按名称，例如：metowolf/IPList）"
+        echo "b) 禁用某个规则库"
+        echo "c) 恢复默认（启用全部内置源）"
+        echo "d) 返回主菜单"
         echo ""
-        read -rp "请选择操作 [a/b/c]: " choice
+        read -rp "请选择操作 [a/b/c/d]: " choice
         case "$choice" in
             a)
-                read -rp "请输入要启用的规则库名称: " lib
-                [ -n "$lib" ] && enable_library "$lib"
+                read -rp "请输入要启用的规则库名称: " name
+                [ -n "$name" ] && enable_ip_source "$name"
                 read -rp "按回车键继续..." ;;
             b)
-                read -rp "请输入要关闭的规则库名称: " lib
-                [ -n "$lib" ] && disable_library "$lib"
+                read -rp "请输入要禁用的规则库名称: " name
+                [ -n "$name" ] && disable_ip_source "$name"
                 read -rp "按回车键继续..." ;;
             c)
+                reset_ip_sources_to_default
+                read -rp "按回车键继续..." ;;
+            d)
                 return ;;
             *)
                 print_error "无效选择"
@@ -631,7 +674,7 @@ show_menu() {
     printf "${GREEN}3.${NC} 放行端口（完全允许访问）\n"
     printf "${GREEN}4.${NC} 查看当前 iptables 规则\n"
     printf "${GREEN}5.${NC} IP白名单管理\n"
-    printf "${GREEN}6.${NC} 规则库选择\n"
+    printf "${GREEN}6.${NC} IP 源规则库选择（选择使用哪些中国IP数据源）\n"
     printf "${GREEN}7.${NC} 清除所有规则\n"
     printf "${GREEN}8.${NC} 立即更新中国 IP\n"
     printf "${GREEN}9.${NC} 配置自动更新计划\n"
@@ -773,6 +816,7 @@ main() {
     init_whitelist
     create_whitelist_set
     load_whitelist
+    init_ip_sources
 
     while true; do
         show_menu
@@ -783,7 +827,7 @@ main() {
             3) setup_allow_port;       read -rp "按回车继续..." _ ;;
             4) show_rules;             read -rp "按回车继续..." _ ;;
             5) whitelist_menu ;;
-            6) rule_library_menu ;;
+            6) ip_source_library_menu ;;
             7) clear_all_rules;        read -rp "按回车继续..." _ ;;
             8) update_china_ip;        read -rp "按回车继续..." _ ;;
             9) setup_auto_update;      read -rp "按回车继续..." _ ;;
@@ -797,8 +841,6 @@ main() {
 ########################################
 # 命令行模式（保持安装命令不变）
 ########################################
-
-SCRIPT_PATH="$(readlink -f "$0")"
 
 if [ "$1" = "--whitelist" ] && [ -n "$2" ]; then
     check_root
